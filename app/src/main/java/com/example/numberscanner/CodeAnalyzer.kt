@@ -23,7 +23,7 @@ class CodeAnalyzer(private val onFound: (String) -> Unit) : ImageAnalysis.Analyz
     private val recognizer = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
 
     private val hits = HashMap<String, Pair<Int, Long>>()
-    private val needHits = 2
+    private val needHits = 4
     private val windowMs = 3000L
 
     private val angles = floatArrayOf(0f, -25f, 25f)
