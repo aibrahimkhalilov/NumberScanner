@@ -561,10 +561,7 @@ class MainActivity : AppCompatActivity() {
         try {
             val sorted = list.sortedBy { it.time }
             val sb = StringBuilder("\uFEFF") // BOM для кириллицы
-            
-            // Эта строка заставляет Excel понять, что разделителем является запятая
-            sb.append("sep=,\n")
-            
+            sb.append("sep=,\n") // Инструкция для Excel разделять по запятым
             sb.append("№,Номер,Дата,Время,Партия\n")
             sorted.forEachIndexed { i, it ->
                 val d = Date(it.time)
@@ -585,7 +582,7 @@ class MainActivity : AppCompatActivity() {
         } catch (e: Exception) {
             toast("Ошибка экспорта: ${e.message}")
         }
-    }}
+    }
 
     private fun onCodeFound(code: String) {
         val now = System.currentTimeMillis()
