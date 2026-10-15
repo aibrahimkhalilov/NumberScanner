@@ -103,14 +103,15 @@ class CodeAnalyzer(private val onFound: (String) -> Unit) : ImageAnalysis.Analyz
         return out
     }
 
-    /** Ищет в строке: 3 буквы + 8 цифр (или 7 цифр). Предпочитает более длинный вариант. */
+    /** Ищет различные комбинации букв (от 1 до 4) и цифр. */
     private fun extract(raw: String): List<String> {
         val clean = raw.uppercase().filter { it in 'A'..'Z' || it in '0'..'9' }
         val out = mutableListOf<String>()
         var i = 0
         while (i < clean.length) {
             var used = 0
-            for (len in intArrayOf(11, 10)) {
+            // Проверяем разную общую длину строки от 8 до 12 символов
+            for (len in intArrayOf(12, 11, 10, 9, 8)) {
                 if (i + len > clean.length) continue
                 val code = convert(clean.substring(i, i + len))
                 if (code != null) {
@@ -125,13 +126,26 @@ class CodeAnalyzer(private val onFound: (String) -> Unit) : ImageAnalysis.Analyz
     }
 
     private fun convert(w: String): String? {
-        if (w.substring(0, 3).count { it in 'A'..'Z' } < 2) return null
+        // Ищем границу между буквами и цифрами (от 1 до 4 букв в начале)
+        var letterCount = 0
+        for (i in 0 until minOf(4, w.length)) {
+            val c = w[i]
+            if (c in 'A'..'Z' || toLetter.containsKey(c)) {
+                letterCount++
+            } else {
+                break
+            }
+        }
+        if (letterCount < 1) return null
+
         val sb = StringBuilder()
-        for (j in 0 until 3) {
+        // Конвертируем буквенную часть
+        for (j in 0 until letterCount) {
             val c = w[j]
             sb.append(if (c in 'A'..'Z') c else (toLetter[c] ?: return null))
         }
-        for (j in 3 until w.length) {
+        // Конвертируем оставшуюся часть в цифры
+        for (j in letterCount until w.length) {
             val c = w[j]
             sb.append(if (c in '0'..'9') c else (toDigit[c] ?: return null))
         }
