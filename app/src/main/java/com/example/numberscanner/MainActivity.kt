@@ -63,6 +63,7 @@ import java.util.Date
 import java.util.Locale
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 
 /** Одна отсканированная марка. photo — ссылка на фото в галерее (может быть пустой). */
 data class ScanItem(var code: String, val time: Long, val batch: String, var photo: String = "")
@@ -72,10 +73,10 @@ data class Snapshot(val current: String, val batches: List<String>, val items: L
 class MainActivity : AppCompatActivity() {
 
     // ---- данные ----
-    private val all = mutableListOf<ScanItem>()        // все марки, старые первыми
-    private val batches = mutableListOf<String>()      // названия партий
-    private var current = "Партия 1"                   // текущая партия
-    private var shown = listOf<ScanItem>()             // то, что сейчас в списке
+    private val all = mutableListOf<ScanItem>()
+    private val batches = mutableListOf<String>()
+    private var current = "Партия 1"
+    private var shown = listOf<ScanItem>()
     private val display = mutableListOf<String>()
 
     // ---- интерфейс / камера ----
@@ -90,7 +91,6 @@ class MainActivity : AppCompatActivity() {
     private var tone: ToneGenerator? = null
     private var torchOn = false
 
-    // антиспам для сигнала «дубликат»
     private var lastDupCode = ""
     private var lastDupTime = 0L
 
@@ -182,7 +182,6 @@ class MainActivity : AppCompatActivity() {
         } else cameraPermissionLauncher.launch(Manifest.permission.CAMERA)
     }
 
-    /** На Android 9 и старше для записи фото в галерею нужно отдельное разрешение. */
     private fun requestStorageIfNeeded() {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q &&
             ContextCompat.checkSelfPermission(this, Manifest.permission.WRITE_EXTERNAL_STORAGE)
@@ -191,8 +190,6 @@ class MainActivity : AppCompatActivity() {
             storagePermissionLauncher.launch(Manifest.permission.WRITE_EXTERNAL_STORAGE)
         }
     }
-
-    // ===================== Сохранение / загрузка =====================
 
     private fun buildJson(): String {
         val root = JSONObject()
@@ -250,8 +247,6 @@ class MainActivity : AppCompatActivity() {
         all.forEach { if (it.batch !in batches) batches.add(it.batch) }
     }
 
-    // ===================== Список, поиск, партии =====================
-
     private fun refresh() {
         val q = searchEdit.text.toString().trim().uppercase()
         if (q.isEmpty()) {
@@ -260,12 +255,12 @@ class MainActivity : AppCompatActivity() {
             shown.forEach {
                 display.add("${it.code}${if (it.photo.isNotEmpty()) "  📷" else ""}\n${dateTimeFmt.format(Date(it.time))}")
             }
-            countText.text = "Партия «$current»: ${shown.size} шт.  \vert{}  Всего: ${all.size}"
+            countText.text = "Партия «$current»: ${shown.size} шт.  |  Всего: ${all.size}"
         } else {
             shown = all.filter { it.code.contains(q) }.reversed()
             display.clear()
             shown.forEach {
-                display.add("${it.code}${if (it.photo.isNotEmpty()) "  📷" else ""}\n${dateTimeFmt.format(Date(it.time))}  ·${it.batch}")
+                display.add("${it.code}${if (it.photo.isNotEmpty()) "  📷" else ""}\n${dateTimeFmt.format(Date(it.time))}  ·  ${it.batch}")
             }
             countText.text = "Поиск «$q»: найдено ${shown.size}"
         }
@@ -296,8 +291,6 @@ class MainActivity : AppCompatActivity() {
             }
         }
     }
-
-    // ===================== Меню элемента =====================
 
     private fun showItemMenu(item: ScanItem) {
         val labels = mutableListOf("Копировать", "Изменить номер", "Удалить")
@@ -341,8 +334,462 @@ class MainActivity : AppCompatActivity() {
         askText("Исправить номер", item.code) { text ->
             val v = text.uppercase()
             when {
-                // ИЗМЕНЕНО: разрешаем от 1 до 4 букв и любые цифры
                 !Regex("[A-Z]{1,4}[0-9]+").matches(v) ->
                     toast("Неверный формат. Пример: AA12345")
                 all.any { it !== item && it.code == v } ->
-                    toast("Такой номер уже есть
+                    toast("Такой номер уже есть в списке")
+                else -> {
+                    item.code = v
+                    save()
+                    refresh()
+                }
+            }
+        }
+    }
+
+    private fun clearDialog() {
+        AlertDialog.Builder(this)
+            .setTitle("Очистить")
+            .setItems(arrayOf("Текущую партию «$current»", "Всё (все партии)")) { _, which ->
+                if (which == 0) {
+                    confirm("Удалить все марки партии «$current»?\n(Фото в галерее останутся.)") {
+                        all.removeAll { it.batch == current }
+                        save()
+                        refresh()
+                    }
+                } else {
+                    confirm("Удалить ВСЕ марки во всех партиях?\n(Фото в галерее останутся.)") {
+                        all.clear()
+                        batches.clear()
+                        current = "Партия 1"
+                        batches.add(current)
+                        save()
+                        refresh()
+                    }
+                }
+            }
+            .setNegativeButton("Отмена", null)
+            .show()
+    }
+
+    private fun moreDialog() {
+        AlertDialog.Builder(this)
+            .setTitle("AKscan")
+            .setItems(
+                arrayOf(
+                    "📊 Статистика",
+                    "💾 Сохранить резервную копию",
+                    "📥 Восстановить из копии"
+                )
+            ) { _, which ->
+                when (which) {
+                    0 -> showStats()
+                    1 -> backup()
+                    2 -> restoreLauncher.launch(arrayOf("*/*"))
+                }
+            }
+            .show()
+    }
+
+    private fun showStats() {
+        val today = dayStart(System.currentTimeMillis())
+        val sb = StringBuilder()
+        sb.append("Сегодня: ${all.count { it.time >= today }}\n")
+        sb.append("Всего: ${all.size}\n\n")
+        sb.append("Последние 7 дней:\n")
+        for (i in 0 until 7) {
+            val from = addDays(today, -i)
+            val to = addDays(from, 1)
+            val c = all.count { it.time >= from && it.time < to }
+            sb.append("${dayLabelFmt.format(Date(from))}: $c\n")
+        }
+        sb.append("\nПо партиям:\n")
+        batches.forEach { b ->
+            val total = all.count { it.batch == b }
+            val t = all.count { it.batch == b && it.time >= today }
+            sb.append("$b: $total  (сегодня $t)\n")
+        }
+        AlertDialog.Builder(this)
+            .setTitle("Статистика")
+            .setMessage(sb.toString())
+            .setPositiveButton("OK", null)
+            .show()
+    }
+
+    private fun backup() {
+        try {
+            val dir = File(cacheDir, "exports").apply { mkdirs() }
+            val stamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.getDefault()).format(Date())
+            val file = File(dir, "AKscan_backup_$stamp.json")
+            file.writeText(buildJson(), Charsets.UTF_8)
+            val uri = FileProvider.getUriForFile(this, "$packageName.fileprovider", file)
+            val send = Intent(Intent.ACTION_SEND).apply {
+                type = "application/json"
+                putExtra(Intent.EXTRA_STREAM, uri)
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }
+            startActivity(Intent.createChooser(send, "Сохранить резервную копию"))
+        } catch (e: Exception) {
+            toast("Ошибка: ${e.message}")
+        }
+    }
+
+    private fun restoreFrom(uri: Uri) {
+        val text = try {
+            contentResolver.openInputStream(uri)?.bufferedReader(Charsets.UTF_8)?.use { it.readText() }
+        } catch (e: Exception) {
+            null
+        }
+        val snap = if (text != null) parse(text.removePrefix("\uFEFF")) else null
+        if (snap == null) {
+            toast("Не удалось прочитать файл копии")
+            return
+        }
+        AlertDialog.Builder(this)
+            .setTitle("В копии: ${snap.items.size} марок")
+            .setItems(
+                arrayOf(
+                    "Объединить с текущими данными",
+                    "Заменить все данные (текущие будут удалены)"
+                )
+            ) { _, which ->
+                if (which == 0) {
+                    var added = 0
+                    snap.items.forEach { n ->
+                        if (all.none { a -> a.code == n.code }) {
+                            all.add(n)
+                            added++
+                        }
+                    }
+                    snap.batches.forEach { b -> if (b !in batches) batches.add(b) }
+                    all.sortBy { it.time }
+                    normalizeBatches()
+                    toast("Добавлено марок: $added")
+                } else {
+                    all.clear()
+                    batches.clear()
+                    all.addAll(snap.items)
+                    batches.addAll(snap.batches)
+                    current = snap.current
+                    normalizeBatches()
+                    toast("Восстановлено марок: ${all.size}")
+                }
+                save()
+                refresh()
+            }
+            .setNegativeButton("Отмена", null)
+            .show()
+    }
+
+    private fun exportDialog() {
+        if (all.isEmpty()) {
+            toast("Список пуст")
+            return
+        }
+        AlertDialog.Builder(this)
+            .setTitle("Экспорт: какие партии?")
+            .setItems(arrayOf("Текущая партия «$current»", "Все партии")) { _, which ->
+                val base = if (which == 0) all.filter { it.batch == current } else all.toList()
+                pickPeriod(base) { list ->
+                    if (list.isEmpty()) toast("За выбранный период марок нет") else exportCsv(list)
+                }
+            }
+            .show()
+    }
+
+    private fun pickPeriod(base: List<ScanItem>, onResult: (List<ScanItem>) -> Unit) {
+        val today = dayStart(System.currentTimeMillis())
+        AlertDialog.Builder(this)
+            .setTitle("За какой период?")
+            .setItems(arrayOf("За всё время", "Сегодня", "Вчера", "Выбрать день", "Выбрать период")) { _, which ->
+                when (which) {
+                    0 -> onResult(base)
+                    1 -> onResult(inRange(base, today, addDays(today, 1)))
+                    2 -> onResult(inRange(base, addDays(today, -1), today))
+                    3 -> pickDate("Выберите день") { d -> onResult(inRange(base, d, addDays(d, 1))) }
+                    4 -> pickDate("Начало периода") { a ->
+                        pickDate("Конец периода") { b ->
+                            val from = minOf(a, b)
+                            val to = addDays(maxOf(a, b), 1)
+                            onResult(inRange(base, from, to))
+                        }
+                    }
+                }
+            }
+            .show()
+    }
+
+    private fun inRange(list: List<ScanItem>, from: Long, toExclusive: Long) =
+        list.filter { it.time >= from && it.time < toExclusive }
+
+    private fun pickDate(title: String, onPicked: (Long) -> Unit) {
+        val c = Calendar.getInstance()
+        val dlg = DatePickerDialog(
+            this,
+            { _, y, m, d ->
+                val cal = Calendar.getInstance()
+                cal.set(y, m, d, 0, 0, 0)
+                cal.set(Calendar.MILLISECOND, 0)
+                onPicked(cal.timeInMillis)
+            },
+            c.get(Calendar.YEAR), c.get(Calendar.MONTH), c.get(Calendar.DAY_OF_MONTH)
+        )
+        dlg.setTitle(title)
+        dlg.show()
+    }
+
+    private fun dayStart(ms: Long): Long {
+        val c = Calendar.getInstance()
+        c.timeInMillis = ms
+        c.set(Calendar.HOUR_OF_DAY, 0)
+        c.set(Calendar.MINUTE, 0)
+        c.set(Calendar.SECOND, 0)
+        c.set(Calendar.MILLISECOND, 0)
+        return c.timeInMillis
+    }
+
+    private fun addDays(ms: Long, days: Int): Long {
+        val c = Calendar.getInstance()
+        c.timeInMillis = ms
+        c.add(Calendar.DAY_OF_YEAR, days)
+        return c.timeInMillis
+    }
+
+    private fun csvText(s: String) = "\"" + s.replace("\"", "\"\"") + "\""
+
+    private fun exportCsv(list: List<ScanItem>) {
+        try {
+            val sorted = list.sortedBy { it.time }
+            val sb = StringBuilder("\uFEFF")
+            sb.append("№;Номер;Дата;Время;Партия\n")
+            sorted.forEachIndexed { i, it ->
+                val d = Date(it.time)
+                sb.append("${i + 1};${it.code};${dateFmt.format(d)};${timeFmt.format(d)};${csvText(it.batch)}\n")
+            }
+            val dir = File(cacheDir, "exports").apply { mkdirs() }
+            val stamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.getDefault()).format(Date())
+            val file = File(dir, "AKscan_$stamp.csv")
+            file.writeText(sb.toString(), Charsets.UTF_8)
+
+            val uri = FileProvider.getUriForFile(this, "$packageName.fileprovider", file)
+            val send = Intent(Intent.ACTION_SEND).apply {
+                type = "text/csv"
+                putExtra(Intent.EXTRA_STREAM, uri)
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }
+            startActivity(Intent.createChooser(send, "Экспорт CSV"))
+        } catch (e: Exception) {
+            toast("Ошибка экспорта: ${e.message}")
+        }
+    }
+
+    private fun onCodeFound(code: String) {
+        val now = System.currentTimeMillis()
+        val existing = all.firstOrNull { it.code == code }
+
+        if (existing != null) {
+            if (code != lastDupCode || now - lastDupTime > 4000) {
+                tone?.startTone(ToneGenerator.TONE_SUP_ERROR, 400)
+                vibrate(500)
+                Toast.makeText(
+                    this,
+                    "УЖЕ СКАНИРОВАЛСЯ!\n$code\n${dateTimeFmt.format(Date(existing.time))}, ${existing.batch}",
+                    Toast.LENGTH_LONG
+                ).show()
+            }
+            lastDupCode = code
+            lastDupTime = now
+            return
+        }
+
+        val item = ScanItem(code, now, current)
+        all.add(item)
+        lastDupCode = code
+        lastDupTime = now
+        save()
+        refresh()
+        tone?.startTone(ToneGenerator.TONE_PROP_BEEP, 150)
+        vibrate(80)
+        takePhoto(item)
+    }
+
+    private fun takePhoto(item: ScanItem) {
+        val capture = imageCapture ?: return
+        val name = "AKscan_${item.code}_" +
+            SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date(item.time))
+        val executor = ContextCompat.getMainExecutor(this)
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            val values = ContentValues().apply {
+                put(MediaStore.MediaColumns.DISPLAY_NAME, name)
+                put(MediaStore.MediaColumns.MIME_TYPE, "image/jpeg")
+                put(MediaStore.MediaColumns.RELATIVE_PATH, "Pictures/AKscan")
+            }
+            val options = ImageCapture.OutputFileOptions.Builder(
+                contentResolver, MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values
+            ).build()
+            capture.takePicture(options, executor, object : ImageCapture.OnImageSavedCallback {
+                override fun onImageSaved(output: ImageCapture.OutputFileResults) {
+                    item.photo = output.savedUri?.toString() ?: ""
+                    save()
+                    refresh()
+                }
+                override fun onError(exception: ImageCaptureException) {}
+            })
+        } else {
+            if (ContextCompat.checkSelfPermission(this, Manifest.permission.WRITE_EXTERNAL_STORAGE)
+                != PackageManager.PERMISSION_GRANTED
+            ) return
+            val dir = File(
+                Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_PICTURES),
+                "AKscan"
+            )
+            dir.mkdirs()
+            val file = File(dir, "$name.jpg")
+            val options = ImageCapture.OutputFileOptions.Builder(file).build()
+            capture.takePicture(options, executor, object : ImageCapture.OnImageSavedCallback {
+                override fun onImageSaved(output: ImageCapture.OutputFileResults) {
+                    MediaScannerConnection.scanFile(
+                        this@MainActivity, arrayOf(file.absolutePath), arrayOf("image/jpeg")
+                    ) { _, uri ->
+                        runOnUiThread {
+                            item.photo = uri?.toString() ?: ""
+                            save()
+                            refresh()
+                        }
+                    }
+                }
+                override fun onError(exception: ImageCaptureException) {}
+            })
+        }
+    }
+
+    @Suppress("DEPRECATION")
+    private fun vibrate(ms: Long) {
+        try {
+            val v: Vibrator = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                (getSystemService(Context.VIBRATOR_MANAGER_SERVICE) as VibratorManager).defaultVibrator
+            } else {
+                getSystemService(Context.VIBRATOR_SERVICE) as Vibrator
+            }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                v.vibrate(VibrationEffect.createOneShot(ms, VibrationEffect.DEFAULT_AMPLITUDE))
+            } else {
+                v.vibrate(ms)
+            }
+        } catch (e: Exception) {}
+    }
+
+    private fun toast(msg: String) = Toast.makeText(this, msg, Toast.LENGTH_SHORT).show()
+
+    private fun confirm(message: String, onYes: () -> Unit) {
+        AlertDialog.Builder(this)
+            .setMessage(message)
+            .setPositiveButton("Да") { _, _ -> onYes() }
+            .setNegativeButton("Отмена", null)
+            .show()
+    }
+
+    private fun askText(title: String, initial: String, onOk: (String) -> Unit) {
+        val input = EditText(this).apply {
+            setText(initial)
+            setSelection(text.length)
+            inputType = InputType.TYPE_CLASS_TEXT
+            if (title.contains("номер", ignoreCase = true)) {
+                inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_CAP_CHARACTERS
+                filters = arrayOf(InputFilter.AllCaps())
+            }
+        }
+        val pad = (20 * resources.displayMetrics.density).toInt()
+        val box = FrameLayout(this).apply {
+            setPadding(pad, pad / 2, pad, 0)
+            addView(input)
+        }
+        AlertDialog.Builder(this)
+            .setTitle(title)
+            .setView(box)
+            .setPositiveButton("OK") { _, _ -> onOk(input.text.toString().trim()) }
+            .setNegativeButton("Отмена", null)
+            .show()
+    }
+
+    private fun updateFrame() {
+        val vw = previewView.width.toFloat()
+        val vh = previewView.height.toFloat()
+        if (vw == 0f || vh == 0f) return
+        val scale = maxOf(vw / 9f, vh / 16f)
+        val w = minOf(vw, ScanConfig.CROP_W * 9f * scale).toInt()
+        val h = minOf(vh, ScanConfig.CROP_H * 16f * scale).toInt()
+        val lp = scanFrame.layoutParams as FrameLayout.LayoutParams
+        if (lp.width != w || lp.height != h) {
+            lp.width = w
+            lp.height = h
+            lp.gravity = Gravity.CENTER
+            scanFrame.layoutParams = lp
+        }
+    }
+
+    private fun startCamera() {
+        val providerFuture = ProcessCameraProvider.getInstance(this)
+        providerFuture.addListener({
+            val provider = providerFuture.get()
+
+            val aspect = AspectRatioStrategy.RATIO_16_9_FALLBACK_AUTO_STRATEGY
+            val previewSelector = ResolutionSelector.Builder()
+                .setAspectRatioStrategy(aspect)
+                .build()
+            val analysisSelector = ResolutionSelector.Builder()
+                .setAspectRatioStrategy(aspect)
+                .setResolutionStrategy(
+                    ResolutionStrategy(
+                        Size(1920, 1080),
+                        ResolutionStrategy.FALLBACK_RULE_CLOSEST_HIGHER_THEN_LOWER
+                    )
+                ).build()
+            val captureSelector = ResolutionSelector.Builder()
+                .setAspectRatioStrategy(aspect)
+                .setResolutionStrategy(
+                    ResolutionStrategy(
+                        Size(1280, 720),
+                        ResolutionStrategy.FALLBACK_RULE_CLOSEST_LOWER_THEN_HIGHER
+                    )
+                ).build()
+
+            val preview = Preview.Builder()
+                .setResolutionSelector(previewSelector)
+                .build()
+                .also { it.setSurfaceProvider(previewView.surfaceProvider) }
+
+            val analysis = ImageAnalysis.Builder()
+                .setResolutionSelector(analysisSelector)
+                .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+                .build()
+            analysis.setAnalyzer(cameraExecutor, CodeAnalyzer { onCodeFound(it) })
+
+            val capture = ImageCapture.Builder()
+                .setCaptureMode(ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY)
+                .setResolutionSelector(captureSelector)
+                .build()
+            imageCapture = capture
+
+            provider.unbindAll()
+            camera = provider.bindToLifecycle(
+                this, CameraSelector.DEFAULT_BACK_CAMERA, preview, analysis, capture
+            )
+
+            previewView.setOnTouchListener { _, event ->
+                if (event.action == MotionEvent.ACTION_UP) {
+                    val factory = previewView.meteringPointFactory
+                    val point = factory.createPoint(event.x, event.y)
+                    val action = FocusMeteringAction.Builder(point, FocusMeteringAction.FLAG_AF or FocusMeteringAction.FLAG_AE)
+                        .setAutoCancelDuration(3, TimeUnit.SECONDS)
+                        .build()
+                    camera?.cameraControl?.startFocusAndMetering(action)
+                    true
+                } else {
+                    false
+                }
+            }
+        }, ContextCompat.getMainExecutor(this))
+    }
+}
