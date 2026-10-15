@@ -13,7 +13,6 @@ import com.google.mlkit.vision.common.InputImage
 import com.google.mlkit.vision.text.TextRecognition
 import com.google.mlkit.vision.text.latin.TextRecognizerOptions
 
-/** Область кадра, которая анализируется (доля от ширины и высоты). Рамка на экране = эта область. */
 object ScanConfig {
     const val CROP_W = 0.9f
     const val CROP_H = 0.22f
@@ -23,16 +22,13 @@ class CodeAnalyzer(private val onFound: (String) -> Unit) : ImageAnalysis.Analyz
 
     private val recognizer = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
 
-    // Номер принимается, если распознан минимум в 2 кадрах за 3 секунды
     private val hits = HashMap<String, Pair<Int, Long>>()
     private val needHits = 2
     private val windowMs = 3000L
 
-    // Каждый кадр поворачиваем на разный угол: код на акцизе обычно стоит под наклоном
     private val angles = floatArrayOf(0f, -25f, 25f)
     private var frameIndex = 0
 
-    // Чёрно-белое изображение с высоким контрастом: убирает защитный узор на фоне
     private val paint = Paint(Paint.FILTER_BITMAP_FLAG).apply {
         val cm = ColorMatrix().apply { setSaturation(0f) }
         val c = 1.8f
@@ -50,7 +46,6 @@ class CodeAnalyzer(private val onFound: (String) -> Unit) : ImageAnalysis.Analyz
         colorFilter = ColorMatrixColorFilter(cm)
     }
 
-    // Похожие символы: что на месте цифры могло быть буквой и наоборот
     private val toDigit = mapOf(
         'O' to '0', 'Q' to '0', 'D' to '0',
         'I' to '1', 'L' to '1', 'T' to '1', 'J' to '1',
@@ -79,7 +74,6 @@ class CodeAnalyzer(private val onFound: (String) -> Unit) : ImageAnalysis.Analyz
             .addOnCompleteListener { proxy.close() }
     }
 
-    /** Поворот + обрезка центральной области + контраст. */
     private fun prepare(proxy: ImageProxy): Bitmap {
         val src = proxy.toBitmap()
         val rot = proxy.imageInfo.rotationDegrees
@@ -103,14 +97,12 @@ class CodeAnalyzer(private val onFound: (String) -> Unit) : ImageAnalysis.Analyz
         return out
     }
 
-    /** Ищет различные комбинации букв (от 1 до 4) и цифр. */
     private fun extract(raw: String): List<String> {
         val clean = raw.uppercase().filter { it in 'A'..'Z' || it in '0'..'9' }
         val out = mutableListOf<String>()
         var i = 0
         while (i < clean.length) {
             var used = 0
-            // Проверяем разную общую длину строки от 8 до 12 символов
             for (len in intArrayOf(12, 11, 10, 9, 8)) {
                 if (i + len > clean.length) continue
                 val code = convert(clean.substring(i, i + len))
@@ -126,9 +118,8 @@ class CodeAnalyzer(private val onFound: (String) -> Unit) : ImageAnalysis.Analyz
     }
 
     private fun convert(w: String): String? {
-        // Ищем границу между буквами и цифрами (от 1 до 4 букв в начале)
         var letterCount = 0
-        for (i in 0 until minOf(4, w.length)) {
+        for (i in 0 until minOf(3, w.length)) {
             val c = w[i]
             if (c in 'A'..'Z' || toLetter.containsKey(c)) {
                 letterCount++
@@ -136,15 +127,15 @@ class CodeAnalyzer(private val onFound: (String) -> Unit) : ImageAnalysis.Analyz
                 break
             }
         }
-        if (letterCount < 1) return null
+        
+        // Разрешаем от 1 до 3 букв в начале
+        if (letterCount !in 1..3) return null
 
         val sb = StringBuilder()
-        // Конвертируем буквенную часть
         for (j in 0 until letterCount) {
             val c = w[j]
             sb.append(if (c in 'A'..'Z') c else (toLetter[c] ?: return null))
         }
-        // Конвертируем оставшуюся часть в цифры
         for (j in letterCount until w.length) {
             val c = w[j]
             sb.append(if (c in '0'..'9') c else (toDigit[c] ?: return null))
